@@ -1,0 +1,70 @@
+# Environment variables
+.env
+.env.local
+.env.*.local
+*.env
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work
+go.work.sum
+/vendor/
+/tmp/
+/dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.iml
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+/postgres_data/
+*.sql.gz
+*.dump
+backup/
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Build artifacts
+build/
+dist/
+out/
+bin/
+
+# Test coverage
+coverage/
+*.cover
+*.coverprofile
+
+# Docker
+docker-compose.override.yml
+
+# Generated protobuf (committed with exception)
+# internal/grpc/pb/ — generated files are committed
