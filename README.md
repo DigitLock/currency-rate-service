@@ -289,4 +289,4 @@ This project is part of my professional portfolio demonstrating:
 
 - [GitHub Repository](https://github.com/DigitLock/currency-rate-service)
 - [Expense Tracker](https://github.com/DigitLock/expense-tracker) (primary consumer)
-- Portfolio: [digitlock.systems](https://digitlock.systems)
+- Portfolio: [portfolio.digitlock.systems](https://portfolio.digitlock.systems/)
