@@ -1,4 +1,4 @@
-Currency Rate Service - System Requirements Specification
+# Currency Rate Service - System Requirements Specification
 
 ---
 
@@ -45,8 +45,6 @@ The SRS covers the v1 implementation with focus on essential functionality:
 - **Tooling**: protoc/buf (proto codegen), sqlc (type-safe SQL), pgx/v5 (PostgreSQL driver)
 
 ---
-<br />
-
 
 # 2. Functional Requirements
 
@@ -443,16 +441,14 @@ Returns historical exchange rates for a currency pair within a specified date ra
 }
 ```
 
----
-<br />
 
+---
 
 ## 2.2 User Interface
 
 > Not applicable — Currency Rate Service is a headless microservice with no user-facing interface. Consumers interact via gRPC API only.
 
 ---
-<br />
 
 
 ## 2.3 Use Cases
@@ -743,8 +739,6 @@ Both providers fail → `is_outdated=true` set on latest rate → consumer recei
 - No data is lost — outdated rate becomes a historical record once a fresh rate is inserted
 
 ---
-<br />
-
 
 ## 2.4 Data Model
 
@@ -983,8 +977,6 @@ Per-provider, per-pair health tracking. Updated after every polling attempt. Use
 - **Soft deletes:** `is_active` flags on currency_pairs, providers, and pair_provider_config — deactivation instead of deletion, consistent with Expense Tracker patterns
 
 ---
-<br />
-
 
 ## 2.5 Metrics and Alerts
 
@@ -1019,8 +1011,6 @@ Per-provider, per-pair health tracking. Updated after every polling attempt. Use
 - **Console output:** Critical alerts only (for Docker log monitoring)
 
 ---
-<br />
-
 
 # 3. Non-functional Requirements
 
@@ -1259,8 +1249,6 @@ The HTTP health endpoint (`/readyz`) returns a JSON summary useful for operation
 In v1, operational metrics are derived from structured logs and the health endpoint — no dedicated metrics system (Prometheus, Grafana) is deployed. The metric definitions in Section 2.5.1 describe *what is tracked*; in v1 the data source is logs and the health endpoint JSON. A dedicated metrics exporter may be added in a future version when the ecosystem grows to warrant it.
 
 ---
-<br />
-
 
 # 4. Architecture Decision Records
 
@@ -1432,8 +1420,6 @@ In v1, operational metrics are derived from structured logs and the health endpo
 - When production TLS is needed, the transition requires: certificate provisioning, gRPC server TLS config, consumer client TLS config — a coordinated change across services
 
 ---
-<br />
-
 
 # 5. Provider Adapter Specification
 

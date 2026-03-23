@@ -1,4 +1,4 @@
-Currency Rate Service - Business Requirements Document
+# Currency Rate Service - Business Requirements Document
 
 # 1. Document Overview
 - **Document Owner:** Igor Kudinov — Business & System Analyst
@@ -7,8 +7,6 @@ Currency Rate Service - Business Requirements Document
 - **Main Stakeholders:** Project Owner (BSA/Developer), Expense Tracker Backend (primary consumer), Invoice Generator (future consumer)
 
 ---
-<br />
-
 
 # 2. Executive Summary
 
@@ -19,8 +17,6 @@ The primary problem being solved is the absence of a centralized currency rate s
 The service will periodically collect exchange rates from configurable external providers, persist them in a dedicated database, and expose current and historical rates via a gRPC API accessible without authentication. The initial release targets three fiat currency pairs (RSD↔EUR, RSD↔USD, EUR↔USD), with the architecture designed to support cryptocurrency rates (USDT, USDC, BTC, ETH) in future iterations. Through v1.0, the service is informational only — rates are approximate and not intended for financial-grade calculations.
 
 ---
-<br />
-
 
 # 3. Business Context
 
@@ -58,8 +54,6 @@ Growing cryptocurrency adoption creates an opportunity to extend the service wit
 - **Development workflow:** Establishes patterns for future microservices — separate repository, independent deployment lifecycle, proto-based API contract, inter-service gRPC communication
 
 ---
-<br />
-
 
 # 4. Objectives and Goals
 
@@ -72,8 +66,6 @@ Growing cryptocurrency adoption creates an opportunity to extend the service wit
 | Support extensible provider architecture | New standard REST JSON provider addable via configuration only (no code changes) | Reduced effort to add or replace rate sources; resilience through provider diversity | Medium |
 
 ---
-<br />
-
 
 # 5. Stakeholders
 
@@ -88,8 +80,6 @@ Growing cryptocurrency adoption creates an opportunity to extend the service wit
 | Invoice Generator | Future consumer (gRPC client) | Will consume EUR↔RSD rates for international invoice conversion; depends on API contract stability | Low |
 
 ---
-<br />
-
 
 # 6. Current State (As-Is)
 
@@ -117,8 +107,6 @@ No centralized rate storage or automated collection exists in the ecosystem. Mul
 - No architectural foundation for extending to cryptocurrency rates in the future
 
 ---
-<br />
-
 
 # 7. Future State (To-Be)
 
@@ -177,8 +165,6 @@ graph TB
 > This diagram reflects the business-level service topology. Technical details (ports, protocols, deployment configuration) are specified in the SRS.
 
 ---
-<br />
-
 
 # 8. Business Requirements
 
@@ -198,8 +184,6 @@ graph TB
 | BR-12 | Database-Driven Configuration | The service must manage business configuration (currency pairs, providers, polling intervals, primary/backup assignments) through the database, not configuration files. Only system-level settings (server port, database connection, log level) reside in config files | Medium | Adding a new currency pair or changing a provider assignment requires only a database update, not a config file change or service restart |
 
 ---
-<br />
-
 
 # 9. Functional and Non-Functional Needs
 
@@ -226,8 +210,6 @@ The following constraints and expectations require detailed specification in the
 - **Deployment:** Standalone Docker container with independent build and release lifecycle from Expense Tracker; deployable on the same Hetzner VPS
 
 ---
-<br />
-
 
 # 10. Risks and Dependencies
 
@@ -242,8 +224,6 @@ The following constraints and expectations require detailed specification in the
 | Development timeline conflict with Expense Tracker QA (Stage 5.1) | Low — delayed delivery of either initiative | Medium | Currency Rate Service is an independent project with its own repository; can be developed in parallel without blocking Expense Tracker QA |
 
 ---
-<br />
-
 
 # 11. Expected Benefits and ROI
 
@@ -263,8 +243,6 @@ The following constraints and expectations require detailed specification in the
 - **Rate data volume:** At hourly polling for 3 pairs, the service accumulates ~26,000 historical records per year — minimal storage cost with growing analytical value over time
 
 ---
-<br />
-
 
 # 12. Approval and Sign-Off
 
