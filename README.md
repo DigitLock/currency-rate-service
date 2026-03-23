@@ -4,9 +4,11 @@ Autonomous microservice that collects, stores, and serves live and historical cu
 
 ## 🎯 Project Status
 
-- ✅ **Business Requirements** - Complete (BRD v1.0)
-- ✅ **System Requirements** - Complete (SRS v1.0)
-- 📋 **Implementation** - Planned
+- ✅ **Business Requirements** — Complete (BRD v1.0)
+- ✅ **System Requirements** — Complete (SRS v1.0)
+- ✅ **Core Implementation** — Complete (Stages 1–6)
+- 📋 **Testing & QA** — Planned
+- 📋 **Docker & Deployment** — Planned
 
 ## ✨ Features
 
@@ -27,25 +29,25 @@ Autonomous microservice that collects, stores, and serves live and historical cu
 - **Database**: PostgreSQL (pgx/v5, sqlc)
 - **API**: gRPC (Protocol Buffers)
 - **Logging**: slog (structured JSON)
-- **Proto Tooling**: protoc, buf (linting/breaking changes)
+- **Proto Tooling**: protoc, Makefile
 
 ### Infrastructure
-- **Deployment**: Docker (standalone container)
+- **Deployment**: Docker (standalone container) — planned
 - **Server**: Hetzner VPS (same host as Expense Tracker)
 - **DNS**: Cloudflare (HTTP health endpoint only — gRPC via direct IP)
 
 ## 📡 gRPC API
 
 **Service:** `currency_rate.v1.CurrencyRateService`
+**Port:** `50052`
 
-Proto file: `proto/currency_rate/v1/currency_rate.proto`
+Proto file: `proto/currency_rate/v1/service.proto`
 
 | Method | Description |
 |--------|-------------|
 | `GetRate` | Current rate for a single currency pair |
 | `GetRates` | Current rates for multiple targets relative to a base currency |
 | `ListSupportedPairs` | All configured pairs with polling metadata |
-| `GetRateHistory` | Historical rates for a pair within a date range (may be deferred to v2) |
 
 **Authentication**: None — exchange rates are public data.
 
@@ -80,7 +82,7 @@ Dedicated PostgreSQL database with 5 tables:
 
 **ID type**: BIGSERIAL (auto-increment), consistent with Expense Tracker.
 
-See the [SRS](docs/currency_rate_service_srs.md) Section 2.4 for full schema, constraints, and indexes.
+See the [SRS](Documentation/currency_rate_service_srs.md) Section 2.4 for full schema, constraints, and indexes.
 
 ## 🌐 External Rate Providers (v1)
 
@@ -106,6 +108,8 @@ See the [SRS](docs/currency_rate_service_srs.md) Section 2.4 for full schema, co
 | `LOG_FORMAT` | `json` | Log format: json or text |
 | `PROVIDER_HTTP_TIMEOUT` | `10s` | HTTP timeout for provider requests |
 | `SHUTDOWN_TIMEOUT` | `15s` | Graceful shutdown deadline |
+| `DB_POOL_MAX_CONNS` | `10` | Maximum DB connection pool size |
+| `DB_POOL_MIN_CONNS` | `2` | Minimum idle DB connections |
 
 ### Business (database-driven)
 
@@ -113,41 +117,73 @@ Currency pairs, providers, polling intervals, and pair-provider assignments are 
 
 ## 📚 Documentation
 
-Located in `docs/`:
+Located in `Documentation/`:
 
-- [`currency_rate_service_brd.md`](docs/currency_rate_service_brd.md) – Business Requirements Document (12 BRs, stakeholders, risks, benefits)
-- [`currency_rate_service_srs.md`](docs/currency_rate_service_srs.md) – System Requirements Specification (gRPC API contract, 4 use cases, 5-table data model, 6 ADRs, provider adapter spec)
+- [`currency_rate_service_brd.md`](Documentation/currency_rate_service_brd.md) — Business Requirements Document (12 BRs, stakeholders, risks, benefits)
+- [`currency_rate_service_srs.md`](Documentation/currency_rate_service_srs.md) — System Requirements Specification (gRPC API contract, 4 use cases, 5-table data model, 6 ADRs, provider adapter spec)
 
 ## 📋 Project Structure
 
 ```
 currency-rate-service/
-├── docs/                    # Business and system requirements
+├── cmd/
+│   └── server/
+│       └── main.go              # Application entrypoint
+├── internal/
+│   ├── adapter/
+│   │   ├── adapter.go           # RateProvider interface, CurrencyPair, RateResult
+│   │   ├── generic_json.go      # Generic JSON adapter (URL template + JSONPath)
+│   │   └── registry.go          # Adapter registry (resolve by provider name)
+│   ├── config/
+│   │   └── config.go            # Environment variable loading with defaults
+│   ├── grpc/
+│   │   ├── pb/
+│   │   │   ├── service.pb.go        # Generated protobuf types
+│   │   │   └── service_grpc.pb.go   # Generated gRPC server/client stubs
+│   │   └── server.go            # gRPC handlers (GetRate, GetRates, ListSupportedPairs)
+│   ├── health/
+│   │   └── handler.go           # HTTP health endpoints (/healthz, /readyz)
+│   ├── polling/
+│   │   ├── scheduler.go         # Polling engine (per-pair goroutines, failover)
+│   │   └── pgconv.go            # pgx type conversion helpers
+│   └── repository/
+│       ├── queries/                 # SQL query sources
+│       │   ├── currency_pairs.sql
+│       │   ├── providers.sql
+│       │   ├── pair_provider_config.sql
+│       │   ├── rates.sql
+│       │   └── provider_health.sql
+│       ├── models.go                # sqlc-generated models
+│       ├── db.go                    # sqlc-generated DB interface
+│       ├── currency_pairs.sql.go    # sqlc-generated query functions
+│       ├── providers.sql.go
+│       ├── pair_provider_config.sql.go
+│       ├── rates.sql.go
+│       └── provider_health.sql.go
+├── migrations/                  # Versioned SQL (golang-migrate format)
+│   ├── 001_currency_pairs.up.sql
+│   ├── 001_currency_pairs.down.sql
+│   ├── 002_providers.up.sql
+│   ├── 002_providers.down.sql
+│   ├── 003_pair_provider_config.up.sql
+│   ├── 003_pair_provider_config.down.sql
+│   ├── 004_rates.up.sql
+│   ├── 004_rates.down.sql
+│   ├── 005_provider_health.up.sql
+│   └── 005_provider_health.down.sql
+├── proto/
+│   └── currency_rate/v1/
+│       └── service.proto        # gRPC service definition
+├── Documentation/
 │   ├── currency_rate_service_brd.md
 │   └── currency_rate_service_srs.md
-├── cmd/
-│   └── server/              # Application entrypoint
-├── internal/
-│   ├── config/              # Environment and DB config loading
-│   ├── grpc/
-│   │   ├── pb/              # Generated protobuf Go code
-│   │   └── server/          # gRPC handlers
-│   ├── health/              # HTTP health endpoints (/healthz, /readyz)
-│   ├── polling/             # Scheduler and polling engine
-│   ├── provider/
-│   │   ├── adapter/         # Generic JSON adapter
-│   │   └── registry/        # Adapter registry (generic + custom)
-│   └── repository/          # Database queries (sqlc)
-├── migrations/              # Versioned SQL migrations
-├── proto/
-│   └── currency_rate/v1/    # Proto source files
-├── Dockerfile
-├── docker-compose.yml
-├── buf.yaml                 # buf lint configuration
-├── Makefile                 # Proto codegen, build, migrate
+├── .env.example
+├── .gitignore
 ├── go.mod
 ├── go.sum
 ├── LICENSE
+├── Makefile                     # Proto codegen targets
+├── sqlc.yaml                    # sqlc configuration
 └── README.md
 ```
 
@@ -158,7 +194,7 @@ currency-rate-service/
 - Go 1.25+
 - PostgreSQL 15+
 - protoc + protoc-gen-go + protoc-gen-go-grpc
-- Docker (for deployment)
+- grpcurl (for testing)
 
 ### Development
 
@@ -167,29 +203,23 @@ currency-rate-service/
 git clone https://github.com/DigitLock/currency-rate-service.git
 cd currency-rate-service
 
-# Create database
+# Create database and run migrations
 createdb currency_rates_dev
+psql -d currency_rates_dev -f migrations/001_currency_pairs.up.sql
+psql -d currency_rates_dev -f migrations/002_providers.up.sql
+psql -d currency_rates_dev -f migrations/003_pair_provider_config.up.sql
+psql -d currency_rates_dev -f migrations/004_rates.up.sql
+psql -d currency_rates_dev -f migrations/005_provider_health.up.sql
 
-# Run migrations
-make migrate-up
+# Copy and edit env
+cp .env.example .env
+# Edit .env with your DATABASE_URL
 
 # Generate proto (if changed)
 make proto
 
 # Run
-DATABASE_URL="postgres://user:pass@localhost:5432/currency_rates_dev?sslmode=disable" \
-  go run ./cmd/server
-```
-
-### Docker
-
-```bash
-docker build -t currency-rate-service .
-docker run -d \
-  -e DATABASE_URL="postgres://user:pass@host:5432/currency_rates?sslmode=disable" \
-  -p 50052:50052 \
-  -p 8090:8090 \
-  currency-rate-service
+export $(grep -v '^#' .env | xargs) && go run cmd/server/main.go
 ```
 
 ### Verification
@@ -204,22 +234,6 @@ grpcurl -plaintext localhost:50052 \
   currency_rate.v1.CurrencyRateService/ListSupportedPairs
 ```
 
-## 🎨 Demo
-
-**Demo environment** (Hetzner VPS):
-
-| Service | Address |
-|---------|---------|
-| gRPC API | `46.224.29.194:50052` (plaintext) |
-| Health | `http://46.224.29.194:8090/readyz` |
-
-```bash
-grpcurl -plaintext 46.224.29.194:50052 \
-  currency_rate.v1.CurrencyRateService/ListSupportedPairs
-```
-
-**Note**: gRPC is accessible via direct IP only — Cloudflare free plan does not proxy gRPC traffic.
-
 ## 🚀 Roadmap
 
 ### Phase 1: Documentation ✅
@@ -228,27 +242,30 @@ grpcurl -plaintext 46.224.29.194:50052 \
 - [x] Architecture Decision Records (6 ADRs)
 - [x] Provider Adapter Specification
 
-### Phase 2: Core Implementation 📋
-- [ ] Project scaffolding (go.mod, Makefile, Dockerfile)
-- [ ] Database migrations and seed data
-- [ ] Repository layer (sqlc)
-- [ ] Generic JSON adapter
-- [ ] Adapter registry
-- [ ] Polling engine (scheduler, failover, health tracking)
-- [ ] gRPC server (4 methods)
-- [ ] HTTP health endpoints
+### Phase 2: Core Implementation ✅
+- [x] Project scaffolding (Go module, config, slog, graceful shutdown)
+- [x] Database migrations with seed data (golang-migrate format)
+- [x] Repository layer (sqlc — type-safe queries for all 5 tables)
+- [x] Generic JSON adapter (URL templates, JSONPath, currency code mapping)
+- [x] Adapter registry (resolve by provider name)
+- [x] Polling engine (per-pair goroutines, failover, health tracking)
+- [x] gRPC server (GetRate, GetRates, ListSupportedPairs)
+- [x] HTTP health endpoints (/healthz, /readyz with JSON status)
 
 ### Phase 3: Testing & QA 📋
+- [ ] E2E testing (grpcurl, provider failover, staleness scenarios)
 - [ ] Unit tests (adapters, polling, repository)
-- [ ] Integration tests (polling → storage → retrieval)
-- [ ] grpcurl verification for all methods
-- [ ] Provider failover scenarios
+- [ ] Edge case verification (unknown currency, DB disconnect)
 
 ### Phase 4: Deployment 📋
-- [ ] Docker build and compose
-- [ ] Demo environment deployment
-- [ ] Expense Tracker integration (gRPC client)
-- [ ] Monitoring and alerting
+- [ ] Dockerfile (multi-stage build)
+- [ ] docker-compose alongside Expense Tracker
+- [ ] Demo environment deployment (Hetzner VPS)
+- [ ] Health endpoint monitoring
+
+### Phase 5: Integration 📋
+- [ ] Expense Tracker gRPC client integration
+- [ ] GetRateHistory method (v2)
 
 ## 📄 License
 
