@@ -154,6 +154,7 @@ currency-rate-service/
 │   │   └── handler.go           # HTTP health endpoints (/healthz, /readyz)
 │   ├── polling/
 │   │   ├── scheduler.go         # Polling engine (per-pair goroutines, failover)
+│   │   ├── reload.go            # Config reload loop, pair reconciliation, provider registry rebuild
 │   │   └── pgconv.go            # pgx type conversion helpers
 │   └── repository/
 │       ├── queries/                 # SQL query sources

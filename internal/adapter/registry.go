@@ -25,6 +25,18 @@ func (r *Registry) Register(provider RateProvider) {
 	r.adapters[provider.Name()] = provider
 }
 
+// ReplaceAll atomically swaps the whole adapter set (used by the config reload loop, SRS 3.1.2).
+func (r *Registry) ReplaceAll(providers []RateProvider) {
+	adapters := make(map[string]RateProvider, len(providers))
+	for _, p := range providers {
+		adapters[p.Name()] = p
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.adapters = adapters
+}
+
 // Get returns a provider adapter by name.
 func (r *Registry) Get(name string) (RateProvider, error) {
 	r.mu.RLock()

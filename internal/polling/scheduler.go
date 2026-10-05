@@ -13,56 +13,170 @@ import (
 	"github.com/DigitLock/currency-rate-service/internal/repository"
 )
 
-// Scheduler manages polling cycles for all active currency pairs.
+// Scheduler manages polling cycles for all active currency pairs and reloads
+// business configuration from the database every reload interval (SRS 3.1.2).
 type Scheduler struct {
-	pool     *pgxpool.Pool
-	queries  *repository.Queries
-	registry *adapter.Registry
-	logger   *slog.Logger
-	wg       sync.WaitGroup
-	cancel   context.CancelFunc
+	pool            *pgxpool.Pool
+	queries         *repository.Queries
+	registry        *adapter.Registry
+	logger          *slog.Logger
+	providerTimeout time.Duration
+	reloadInterval  time.Duration
+	wg              sync.WaitGroup
+	cancel          context.CancelFunc
+
+	// Reload state, accessed only from the reload path and Stop.
+	mu                  sync.Mutex
+	running             map[int64]runningPair
+	providerFingerprint string
 }
 
-// NewScheduler creates a new polling scheduler.
-func NewScheduler(pool *pgxpool.Pool, registry *adapter.Registry, logger *slog.Logger) *Scheduler {
+// runningPair is a pair with an active polling loop.
+type runningPair struct {
+	pair   repository.CurrencyPair
+	cancel context.CancelFunc
+}
+
+// NewScheduler creates a new polling scheduler with its own adapter registry.
+func NewScheduler(pool *pgxpool.Pool, logger *slog.Logger, providerTimeout, reloadInterval time.Duration) *Scheduler {
 	return &Scheduler{
-		pool:     pool,
-		queries:  repository.New(pool),
-		registry: registry,
-		logger:   logger,
+		pool:            pool,
+		queries:         repository.New(pool),
+		registry:        adapter.NewRegistry(),
+		logger:          logger,
+		providerTimeout: providerTimeout,
+		reloadInterval:  reloadInterval,
+		running:         make(map[int64]runningPair),
 	}
 }
 
-// Start launches polling goroutines for all active pairs.
+// Start loads configuration once, launches polling for all active pairs and
+// starts the configuration reload loop. A failed first load is returned as an error.
 func (s *Scheduler) Start(ctx context.Context) error {
 	ctx, s.cancel = context.WithCancel(ctx)
+
+	if err := s.reload(ctx); err != nil {
+		s.cancel()
+		return err
+	}
+
+	s.mu.Lock()
+	pairs := len(s.running)
+	s.mu.Unlock()
+
+	if pairs == 0 {
+		s.logger.Warn("no active currency pairs found, waiting for configuration reload")
+	}
+
+	s.wg.Add(1)
+	go s.reloadLoop(ctx)
+
+	s.logger.Info("polling engine started", "pairs", pairs, "reload_interval", s.reloadInterval.String())
+	return nil
+}
+
+// Stop signals the reload loop and all polling goroutines to stop and waits for completion.
+func (s *Scheduler) Stop() {
+	if s.cancel != nil {
+		s.cancel()
+	}
+	s.wg.Wait()
+
+	s.mu.Lock()
+	clear(s.running)
+	s.mu.Unlock()
+
+	s.logger.Info("polling engine stopped")
+}
+
+// reloadLoop reloads configuration once per reload interval until ctx is done.
+func (s *Scheduler) reloadLoop(ctx context.Context) {
+	defer s.wg.Done()
+
+	ticker := time.NewTicker(s.reloadInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.reload(ctx); err != nil && ctx.Err() == nil {
+				s.logger.Warn("configuration read failed, using previous configuration",
+					"component", "config",
+					"error", err,
+				)
+			}
+		}
+	}
+}
+
+// reload reads active providers and pairs, rebuilds the adapter registry if providers
+// changed and reconciles polling loops with active pairs (SRS 3.1.2).
+// If a read fails, nothing is changed and the error is returned.
+func (s *Scheduler) reload(ctx context.Context) error {
+	providers, err := s.queries.GetActiveProviders(ctx)
+	if err != nil {
+		return fmt.Errorf("load active providers: %w", err)
+	}
 
 	pairs, err := s.queries.GetActivePairs(ctx)
 	if err != nil {
 		return fmt.Errorf("load active pairs: %w", err)
 	}
 
-	if len(pairs) == 0 {
-		s.logger.Warn("no active currency pairs found")
-		return nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	providersChanged := false
+	if fp := providersFingerprint(providers); fp != s.providerFingerprint {
+		s.registry.ReplaceAll(buildProviders(providers, s.providerTimeout, s.logger))
+		s.providerFingerprint = fp
+		providersChanged = true
 	}
 
-	for _, pair := range pairs {
-		s.wg.Add(1)
-		go s.pollPair(ctx, pair)
+	running := make(map[int64]repository.CurrencyPair, len(s.running))
+	for id, rp := range s.running {
+		running[id] = rp.pair
 	}
 
-	s.logger.Info("polling engine started", "pairs", len(pairs))
+	start, stop, restart := planReconcile(running, pairs)
+
+	for _, id := range stop {
+		s.running[id].cancel()
+		delete(s.running, id)
+	}
+	for _, pair := range restart {
+		s.running[pair.ID].cancel()
+		s.startPair(ctx, pair)
+	}
+	for _, pair := range start {
+		s.startPair(ctx, pair)
+	}
+
+	logArgs := []any{
+		"component", "config",
+		"started", len(start),
+		"stopped", len(stop),
+		"restarted", len(restart),
+		"providers_changed", providersChanged,
+	}
+	if providersChanged || len(start) > 0 || len(stop) > 0 || len(restart) > 0 {
+		s.logger.Info("configuration reloaded", logArgs...)
+	} else {
+		s.logger.Debug("configuration reloaded", logArgs...)
+	}
+
 	return nil
 }
 
-// Stop signals all polling goroutines to stop and waits for completion.
-func (s *Scheduler) Stop() {
-	if s.cancel != nil {
-		s.cancel()
-	}
-	s.wg.Wait()
-	s.logger.Info("polling engine stopped")
+// startPair launches a polling loop for a pair with its own child context. Caller holds s.mu.
+func (s *Scheduler) startPair(ctx context.Context, pair repository.CurrencyPair) {
+	pairCtx, cancel := context.WithCancel(ctx)
+	s.running[pair.ID] = runningPair{pair: pair, cancel: cancel}
+
+	s.wg.Add(1)
+	go s.pollPair(pairCtx, pair)
 }
 
 // pollPair runs the polling loop for a single currency pair.
@@ -122,6 +236,10 @@ func (s *Scheduler) executePollCycle(ctx context.Context, pair repository.Curren
 
 		result, err := provider.FetchRate(ctx, adapterPair)
 		if err != nil {
+			// Pair loop or service is stopping — not a provider failure.
+			if ctx.Err() != nil {
+				return
+			}
 			logger.Warn("provider fetch failed",
 				"provider", cfg.ProviderName,
 				"priority", cfg.Priority,
@@ -167,6 +285,9 @@ func (s *Scheduler) executePollCycle(ctx context.Context, pair repository.Curren
 	}
 
 	// All providers failed — mark outdated (SRS 2.3.4)
+	if ctx.Err() != nil {
+		return
+	}
 	if err := s.queries.MarkOutdated(ctx, pair.ID); err != nil {
 		logger.Error("failed to mark rate as outdated", "error", err)
 	}

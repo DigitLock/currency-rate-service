@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
@@ -10,20 +9,16 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
-	"github.com/DigitLock/currency-rate-service/internal/adapter"
 	"github.com/DigitLock/currency-rate-service/internal/config"
 	grpcserver "github.com/DigitLock/currency-rate-service/internal/grpc"
 	"github.com/DigitLock/currency-rate-service/internal/grpc/pb"
 	"github.com/DigitLock/currency-rate-service/internal/health"
 	"github.com/DigitLock/currency-rate-service/internal/polling"
-	"github.com/DigitLock/currency-rate-service/internal/repository"
 )
 
 func main() {
@@ -42,6 +37,7 @@ func main() {
 		"grpc_port", cfg.GRPCPort,
 		"health_port", cfg.HealthHTTPPort,
 		"log_level", cfg.LogLevel,
+		"config_reload_interval", cfg.ConfigReloadInterval.String(),
 	)
 
 	// Connect to database
@@ -58,15 +54,8 @@ func main() {
 		"min_conns", cfg.DBPoolMinConns,
 	)
 
-	// Build adapter registry from DB providers
-	registry, err := buildRegistry(ctx, pool, cfg.ProviderHTTPTimeout)
-	if err != nil {
-		slog.Error("failed to build adapter registry", "error", err)
-		os.Exit(1)
-	}
-
-	// Start polling engine
-	scheduler := polling.NewScheduler(pool, registry, logger)
+	// Start polling engine (loads providers and pairs, then reloads them every CONFIG_RELOAD_INTERVAL — SRS 3.1.2)
+	scheduler := polling.NewScheduler(pool, logger, cfg.ProviderHTTPTimeout, cfg.ConfigReloadInterval)
 	if err := scheduler.Start(ctx); err != nil {
 		slog.Error("failed to start polling engine", "error", err)
 		os.Exit(1)
@@ -183,58 +172,4 @@ func connectDB(ctx context.Context, cfg *config.Config) (*pgxpool.Pool, error) {
 	}
 
 	return pool, nil
-}
-
-func buildRegistry(ctx context.Context, pool *pgxpool.Pool, timeout time.Duration) (*adapter.Registry, error) {
-	queries := repository.New(pool)
-	providers, err := queries.GetActiveProviders(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("load providers: %w", err)
-	}
-
-	registry := adapter.NewRegistry()
-
-	for _, p := range providers {
-		switch p.AdapterType {
-		case "generic_json":
-			var codeMapping map[string]string
-			if p.CurrencyCodeMapping != nil {
-				codeMapping = parseCodeMapping(p.CurrencyCodeMapping)
-			}
-
-			cfg := adapter.GenericJSONConfig{
-				ProviderName:        p.Name,
-				BaseURL:             p.BaseUrl,
-				RateJSONPath:        stringFromPgText(p.RateJsonPath),
-				CurrencyCodeMapping: codeMapping,
-			}
-
-			registry.Register(adapter.NewGenericJSONAdapter(cfg, timeout))
-			slog.Info("registered provider", "name", p.Name, "type", p.AdapterType)
-
-		case "custom":
-			slog.Warn("custom adapter not implemented, skipping", "name", p.Name)
-
-		default:
-			slog.Warn("unknown adapter type, skipping", "name", p.Name, "type", p.AdapterType)
-		}
-	}
-
-	return registry, nil
-}
-
-func parseCodeMapping(data []byte) map[string]string {
-	var m map[string]string
-	if err := json.Unmarshal(data, &m); err != nil {
-		slog.Warn("failed to parse currency_code_mapping", "error", err)
-		return nil
-	}
-	return m
-}
-
-func stringFromPgText(t pgtype.Text) string {
-	if t.Valid {
-		return t.String
-	}
-	return ""
 }
