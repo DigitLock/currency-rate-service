@@ -19,6 +19,7 @@ message Rate {
   google.protobuf.Timestamp updated_at = 4;
   bool is_outdated = 5;
   string source_provider = 6;
+  string rate_decimal = 7; // Exact stored rate as a plain decimal string with 10 fractional digits (NUMERIC(20,10) text form)
 }
 
 message CurrencyPair {

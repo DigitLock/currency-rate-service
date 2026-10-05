@@ -127,6 +127,7 @@ func rateToProto(from, to string, row repository.GetLatestRateRow) *pb.Rate {
 		UpdatedAt:      timestamppb.New(row.FetchedAt.Time),
 		IsOutdated:     row.IsOutdated,
 		SourceProvider: row.SourceProviderName,
+		RateDecimal:    row.RateText, // PostgreSQL text form of NUMERIC(20,10) (SRS 2.1.2)
 	}
 }
 

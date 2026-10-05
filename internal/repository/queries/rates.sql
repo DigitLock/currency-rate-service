@@ -12,7 +12,8 @@ SELECT
     r.is_outdated,
     r.fetched_at,
     r.created_at,
-    p.name AS source_provider_name
+    p.name AS source_provider_name,
+    r.rate::text AS rate_text
 FROM rates r
          JOIN providers p ON p.id = r.source_provider_id
 WHERE r.currency_pair_id = $1
