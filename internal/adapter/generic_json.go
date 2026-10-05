@@ -4,8 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
+	"math/big"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -65,14 +66,12 @@ func (a *GenericJSONAdapter) FetchRate(ctx context.Context, pair CurrencyPair) (
 		return RateResult{}, fmt.Errorf("HTTP GET %s: status %d", url, resp.StatusCode)
 	}
 
-	// Step 4: Parse JSON response
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return RateResult{}, fmt.Errorf("read response body: %w", err)
-	}
+	// Step 4: Parse JSON response, keeping numbers as their JSON text (no float conversion)
+	dec := json.NewDecoder(resp.Body)
+	dec.UseNumber()
 
 	var data any
-	if err := json.Unmarshal(body, &data); err != nil {
+	if err := dec.Decode(&data); err != nil {
 		return RateResult{}, fmt.Errorf("parse JSON: %w", err)
 	}
 
@@ -83,9 +82,9 @@ func (a *GenericJSONAdapter) FetchRate(ctx context.Context, pair CurrencyPair) (
 		return RateResult{}, fmt.Errorf("extract rate at path %q: %w", path, err)
 	}
 
-	// Step 6: Validate rate
-	if rate <= 0 {
-		return RateResult{}, fmt.Errorf("invalid rate value: %f", rate)
+	// Step 6: Validate rate — must be a positive decimal number
+	if !isPositiveDecimal(rate) {
+		return RateResult{}, fmt.Errorf("invalid rate value: %s", rate)
 	}
 
 	// Step 7: Return result
@@ -122,34 +121,74 @@ func (a *GenericJSONAdapter) buildJSONPath(from, to string) string {
 }
 
 // navigateJSON traverses a parsed JSON structure using dot-notation path (e.g., "rsd.eur" or "rates.EUR").
-func navigateJSON(data any, path string) (float64, error) {
+func navigateJSON(data any, path string) (string, error) {
 	parts := strings.Split(path, ".")
 	current := data
 
 	for _, key := range parts {
 		obj, ok := current.(map[string]any)
 		if !ok {
-			return 0, fmt.Errorf("expected object at key %q, got %T", key, current)
+			return "", fmt.Errorf("expected object at key %q, got %T", key, current)
 		}
 		current, ok = obj[key]
 		if !ok {
-			return 0, fmt.Errorf("key %q not found", key)
+			return "", fmt.Errorf("key %q not found", key)
 		}
 	}
 
-	return toFloat64(current)
+	return toDecimal(current)
 }
 
-// toFloat64 converts a JSON value to float64.
-func toFloat64(v any) (float64, error) {
+// jsonNumberRe matches the JSON number grammar.
+var jsonNumberRe = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$`)
+
+// maxDecimalExponent bounds exponents so a malformed response cannot force a huge expansion.
+const maxDecimalExponent = 100
+
+// toDecimal converts a JSON value to a plain decimal string without going through float64 (SRS 5.2).
+// A literal without an exponent is returned unchanged; an exponent is expanded exactly.
+func toDecimal(v any) (string, error) {
+	var s string
 	switch val := v.(type) {
-	case float64:
-		return val, nil
 	case json.Number:
-		return val.Float64()
+		s = val.String()
 	case string:
-		return strconv.ParseFloat(val, 64)
+		s = val
 	default:
-		return 0, fmt.Errorf("cannot convert %T to float64", v)
+		return "", fmt.Errorf("cannot convert %T to decimal", v)
 	}
+
+	if !jsonNumberRe.MatchString(s) {
+		return "", fmt.Errorf("invalid decimal %q", s)
+	}
+
+	expIdx := strings.IndexAny(s, "eE")
+	if expIdx < 0 {
+		return s, nil
+	}
+
+	mantissa := s[:expIdx]
+	exp, err := strconv.Atoi(s[expIdx+1:])
+	if err != nil || exp > maxDecimalExponent || exp < -maxDecimalExponent {
+		return "", fmt.Errorf("invalid decimal %q: exponent out of range", s)
+	}
+
+	r, ok := new(big.Rat).SetString(s)
+	if !ok {
+		return "", fmt.Errorf("invalid decimal %q", s)
+	}
+
+	fracDigits := 0
+	if dot := strings.IndexByte(mantissa, '.'); dot >= 0 {
+		fracDigits = len(mantissa) - dot - 1
+	}
+
+	// FloatString is exact here: the value has at most fracDigits−exp fractional digits.
+	return r.FloatString(max(0, fracDigits-exp)), nil
+}
+
+// isPositiveDecimal reports whether s parses as a decimal number greater than zero.
+func isPositiveDecimal(s string) bool {
+	r, ok := new(big.Rat).SetString(s)
+	return ok && r.Sign() > 0
 }

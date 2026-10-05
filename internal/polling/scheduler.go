@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/DigitLock/currency-rate-service/internal/adapter"
@@ -235,6 +236,11 @@ func (s *Scheduler) executePollCycle(ctx context.Context, pair repository.Curren
 		}
 
 		result, err := provider.FetchRate(ctx, adapterPair)
+		// An unconvertible rate is treated like a failed fetch for this provider
+		var rate pgtype.Numeric
+		if err == nil {
+			rate, err = pgNumericFromString(result.Rate)
+		}
 		if err != nil {
 			// Pair loop or service is stopping — not a provider failure.
 			if ctx.Err() != nil {
@@ -260,7 +266,7 @@ func (s *Scheduler) executePollCycle(ctx context.Context, pair repository.Curren
 		if _, err := s.queries.InsertRate(ctx, repository.InsertRateParams{
 			CurrencyPairID:   pair.ID,
 			SourceProviderID: cfg.ProviderID,
-			Rate:             pgNumericFromFloat(result.Rate),
+			Rate:             rate,
 			IsOutdated:       false,
 			FetchedAt:        pgTimestamptz(result.FetchedAt),
 		}); err != nil {

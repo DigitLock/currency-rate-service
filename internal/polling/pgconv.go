@@ -1,30 +1,36 @@
 package polling
 
 import (
+	"fmt"
 	"math/big"
-	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-func pgNumericFromFloat(f float64) pgtype.Numeric {
-	// Convert float to string to preserve precision, then parse as big.Int with exponent
-	s := strconv.FormatFloat(f, 'f', 10, 64)
-
+// pgNumericFromString builds a pgtype.Numeric from a plain decimal string (e.g., "1.3225")
+// without a float conversion (SRS 2.4.5).
+func pgNumericFromString(s string) (pgtype.Numeric, error) {
 	// Remove decimal point and count decimal places
 	parts := splitDecimal(s)
 	digits := parts.integer + parts.fractional
 	exp := int32(-len(parts.fractional))
 
-	intVal := new(big.Int)
-	intVal.SetString(digits, 10)
+	if digits == "" || strings.Trim(digits, "0123456789") != "" {
+		return pgtype.Numeric{}, fmt.Errorf("invalid decimal %q", s)
+	}
+
+	intVal, ok := new(big.Int).SetString(digits, 10)
+	if !ok {
+		return pgtype.Numeric{}, fmt.Errorf("invalid decimal %q", s)
+	}
 
 	return pgtype.Numeric{
 		Int:   intVal,
 		Exp:   exp,
 		Valid: true,
-	}
+	}, nil
 }
 
 type decimalParts struct {

@@ -14,7 +14,7 @@ type CurrencyPair struct {
 
 // RateResult represents a successfully fetched exchange rate.
 type RateResult struct {
-	Rate       float64
+	Rate       string // Plain decimal string with the provider's digits (no sign, no exponent), never a float (SRS 5.1)
 	FetchedAt  time.Time
 	SourceName string
 }
