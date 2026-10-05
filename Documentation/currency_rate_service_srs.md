@@ -1028,7 +1028,7 @@ Per-provider, per-pair health tracking. Updated after every polling attempt. Use
 
 ### 3.1.1 System Configuration (Config File / Environment Variables)
 
-System settings are loaded at startup from environment variables (or `.env` file in development). Changes require a service restart.
+System settings are loaded at startup from environment variables. The service does not read a `.env` file itself; in development, export it into the shell first (`set -a; source .env; set +a`). Changes require a service restart.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|

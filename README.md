@@ -233,7 +233,8 @@ cp .env.example .env
 make proto
 
 # Run
-export $(grep -v '^#' .env | xargs) && go run cmd/server/main.go
+set -a; source .env; set +a
+go run cmd/server/main.go
 ```
 
 ### Verification
