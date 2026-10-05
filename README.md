@@ -12,11 +12,11 @@ Autonomous microservice that collects, stores, and serves live and historical cu
 
 ## ✨ Features
 
-- 💱 **Multi-currency rates** (RSD↔EUR, RSD↔USD, EUR↔USD)
+- 💱 **Multi-currency rates** (RSD→EUR, RSD→USD, EUR→USD, GBP→USD, CHF→USD)
 - 🔄 **Automated polling** with configurable per-pair intervals
 - 🛡️ **Provider failover** — primary/backup with automatic switchover
 - ⚠️ **Staleness tracking** — last known rate always available, flagged when outdated
-- 🗄️ **Database-driven config** — add pairs and providers at runtime, no restart
+- 🗄️ **Database-driven config** — add pairs and providers at runtime; changes apply within `CONFIG_RELOAD_INTERVAL`, no restart
 - 🔌 **Hybrid adapter architecture** — generic JSON (config-only) + custom interface (code)
 - 📈 **Historical data** — every poll inserts a new record from day one
 - 🏥 **Health monitoring** — per-provider health tracking, HTTP health endpoints
@@ -51,6 +51,8 @@ Proto file: `proto/currency_rate/v1/service.proto`
 
 **Authentication**: None — exchange rates are public data.
 
+**Rate precision**: every `Rate` returns both `rate` (double, kept for compatibility) and `rate_decimal` — the exact stored value as a decimal string with 10 fractional digits (e.g., `"1.3201000000"`). Use `rate_decimal` for exact arithmetic.
+
 **Testing with grpcurl:**
 ```bash
 # List supported pairs
@@ -59,6 +61,11 @@ grpcurl -plaintext localhost:50052 \
 
 # Get single rate
 grpcurl -plaintext -d '{"from_currency":"RSD","to_currency":"EUR"}' \
+  localhost:50052 \
+  currency_rate.v1.CurrencyRateService/GetRate
+
+# Get GBP→USD rate
+grpcurl -plaintext -d '{"from_currency":"GBP","to_currency":"USD"}' \
   localhost:50052 \
   currency_rate.v1.CurrencyRateService/GetRate
 
@@ -88,10 +95,10 @@ See the [SRS](Documentation/currency_rate_service_srs.md) Section 2.4 for full s
 
 | Provider | Pairs | Rate Limits | Auth |
 |----------|-------|-------------|------|
-| [fawazahmed0](https://github.com/fawazahmed0/exchange-api) (CDN) | RSD↔EUR, RSD↔USD, EUR↔USD | None | None |
-| [fawazahmed0](https://github.com/fawazahmed0/exchange-api) (pages.dev fallback) | RSD↔EUR, RSD↔USD, EUR↔USD | None | None |
-| [ExchangeRate-API](https://www.exchangerate-api.com/docs/free) (open access) | RSD↔EUR, RSD↔USD, EUR↔USD | ~1/day recommended | None |
-| [Frankfurter](https://frankfurter.dev/) (ECB data) | EUR↔USD only | None | None |
+| [fawazahmed0](https://github.com/fawazahmed0/exchange-api) (CDN) | RSD→EUR, RSD→USD, EUR→USD, GBP→USD, CHF→USD | None | None |
+| [fawazahmed0](https://github.com/fawazahmed0/exchange-api) (pages.dev fallback) | RSD→EUR, RSD→USD, EUR→USD, GBP→USD, CHF→USD | None | None |
+| [ExchangeRate-API](https://www.exchangerate-api.com/docs/free) (open access) | RSD→EUR, RSD→USD, EUR→USD, GBP→USD, CHF→USD | ~1/day recommended | None |
+| [Frankfurter](https://frankfurter.dev/) (ECB data) | EUR→USD, GBP→USD, CHF→USD | None | None |
 
 **Note**: Frankfurter does not support RSD (not published by the ECB).
 
@@ -110,16 +117,18 @@ See the [SRS](Documentation/currency_rate_service_srs.md) Section 2.4 for full s
 | `SHUTDOWN_TIMEOUT` | `15s` | Graceful shutdown deadline |
 | `DB_POOL_MAX_CONNS` | `10` | Maximum DB connection pool size |
 | `DB_POOL_MIN_CONNS` | `2` | Minimum idle DB connections |
+| `CONFIG_RELOAD_INTERVAL` | `60s` | How often pairs and providers are reloaded from the database |
 
 ### Business (database-driven)
 
-Currency pairs, providers, polling intervals, and pair-provider assignments are managed in the database. Changes take effect on the next polling cycle — no service restart required.
+Currency pairs, providers, polling intervals, and pair-provider assignments are managed in the database. Changes take effect within `CONFIG_RELOAD_INTERVAL` (default 60s) — no service restart required.
 
 ## 📚 Documentation
 
 Located in `Documentation/`:
 
 - [`currency_rate_service_brd.md`](Documentation/currency_rate_service_brd.md) — Business Requirements Document (12 BRs, stakeholders, risks, benefits)
+- [`currency_rate_service_brd_amendment_1.md`](Documentation/currency_rate_service_brd_amendment_1.md) — BRD Amendment 1 (CAS consumer: GBP→USD and CHF→USD pairs, exact decimal rate, configuration hot reload)
 - [`currency_rate_service_srs.md`](Documentation/currency_rate_service_srs.md) — System Requirements Specification (gRPC API contract, 4 use cases, 5-table data model, 6 ADRs, provider adapter spec)
 
 ## 📋 Project Structure
@@ -170,12 +179,15 @@ currency-rate-service/
 │   ├── 004_rates.up.sql
 │   ├── 004_rates.down.sql
 │   ├── 005_provider_health.up.sql
-│   └── 005_provider_health.down.sql
+│   ├── 005_provider_health.down.sql
+│   ├── 006_pairs_gbp_chf.up.sql
+│   └── 006_pairs_gbp_chf.down.sql
 ├── proto/
 │   └── currency_rate/v1/
 │       └── service.proto        # gRPC service definition
 ├── Documentation/
 │   ├── currency_rate_service_brd.md
+│   ├── currency_rate_service_brd_amendment_1.md
 │   └── currency_rate_service_srs.md
 ├── .env.example
 ├── .gitignore
@@ -210,6 +222,7 @@ psql -d currency_rates_dev -f migrations/002_providers.up.sql
 psql -d currency_rates_dev -f migrations/003_pair_provider_config.up.sql
 psql -d currency_rates_dev -f migrations/004_rates.up.sql
 psql -d currency_rates_dev -f migrations/005_provider_health.up.sql
+psql -d currency_rates_dev -f migrations/006_pairs_gbp_chf.up.sql
 
 # Copy and edit env
 cp .env.example .env
@@ -264,8 +277,13 @@ grpcurl -plaintext localhost:50052 \
 - [ ] Health endpoint monitoring
 
 ### Phase 5: Integration 📋
-- [ ] Expense Tracker gRPC client integration
+- [x] Expense Tracker gRPC client integration
 - [ ] GetRateHistory method (v2)
+
+### Backlog
+- **Intraday rate source** — all current providers publish one rate per day. Trigger: after the Crypto Account Service roadmap is finished (owner decision 2026-10-05).
+- **Frankfurter API v2** — v1 is deprecated but stays available. Trigger: a v1 shutdown notice or the next change of the Frankfurter provider row.
+- **fawazahmed0 jsDelivr caching** — individual `*.min.json` files can be served weeks out of date (observed 2026-10-05: `gbp.min.json` dated 2026-08-31) and `is_outdated` does not show it. Trigger: before CRS is deployed for a consumer outside local development.
 
 ## 📄 License
 

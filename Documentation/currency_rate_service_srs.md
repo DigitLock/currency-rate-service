@@ -16,7 +16,7 @@ The SRS covers the v1 implementation with focus on essential functionality:
 
 - **Core Functionality**: Automated rate collection from external providers, current and historical rate storage, gRPC API for rate retrieval
 - **Technical Architecture**: Standalone Go microservice with gRPC API and dedicated PostgreSQL database
-- **Currency Pairs**: Three fiat pairs — RSD↔EUR, RSD↔USD, EUR↔USD
+- **Currency Pairs**: Five fiat pairs — RSD→EUR, RSD→USD, EUR→USD, GBP→USD, CHF→USD
 - **Provider Architecture**: Hybrid adapter system — generic JSON adapter (config-driven) and custom adapter interface (code)
 - **Configuration**: Database-driven business configuration, config file for system settings only
 - **Cryptocurrency Support**: Out of scope for v1; architecture designed to support it in future iterations
@@ -31,6 +31,7 @@ The SRS covers the v1 implementation with focus on essential functionality:
 **Related Documents**
 
 - **Business Requirements Document (BRD)**: Currency Rate Service BRD v1.0
+- **BRD Amendment 1**: Currency Rate Service BRD Amendment 1 (2026-10-05)
 - **Expense Tracker BRD**: Expense Tracker BRD v1.0 (BR-5: Multi-Currency Support)
 - **Expense Tracker SRS**: Expense Tracker SRS MVP v1.0
 - **gRPC Integration TDD**: Expense Tracker TDD gRPC Integration v1.0 (ADR-6: Inter-Service Communication)
@@ -162,9 +163,10 @@ message Rate {
   string from_currency = 1;          // ISO 4217 currency code (e.g., "RSD")
   string to_currency = 2;            // ISO 4217 currency code (e.g., "EUR")
   double rate = 3;                   // Exchange rate value (see note on precision below)
-  google.protobuf.Timestamp updated_at = 4;  // When this rate was fetched from the provider
+  google.protobuf.Timestamp updated_at = 4;  // When CRS fetched this rate from the provider (not the provider's publication date)
   bool is_outdated = 5;              // True if the most recent polling cycle failed (staleness flag)
   string source_provider = 6;        // Name of the provider that supplied this rate
+  string rate_decimal = 7;           // Exact stored rate as a decimal string, 10 fractional digits (e.g., "0.0085300000")
 }
 
 message CurrencyPair {
@@ -218,7 +220,7 @@ message GetRateHistoryResponse {
 }
 ```
 
-> **Precision note:** The proto field `Rate.rate` uses `double` (IEEE 754 64-bit float) because Protocol Buffers does not have a native decimal type. The database stores rates as `NUMERIC(20,10)` for exact precision. Conversion from `NUMERIC` to `double` may introduce minor floating-point rounding (e.g., 15th decimal place), which is acceptable for the service's informational purpose — rates are approximate, not financial-grade.
+> **Precision note:** The database stores rates as `NUMERIC(20,10)`. Protocol Buffers has no native decimal type, so the rate is returned in two forms. `Rate.rate` (`double`, IEEE 754 64-bit float) may carry floating-point rounding from the `NUMERIC` → `double` conversion (e.g., 15th decimal place); it is kept unchanged for backward compatibility. `Rate.rate_decimal` carries the exact stored value as a plain decimal string — dot separator, no exponent, no sign, always exactly 10 fractional digits with trailing zeros kept (e.g., `"1.3201000000"`, `"0.0085300000"`) — equal to the database value digit for digit. Consumers that need exact arithmetic use `rate_decimal`.
 
 **Authorization**
 
@@ -268,6 +270,7 @@ Returns the current exchange rate for a single currency pair. The response inclu
 | rate.updated_at | Timestamp | Yes | When the rate was fetched | 2026-03-21T16:00:00Z |
 | rate.is_outdated | bool | Yes | Staleness flag | false |
 | rate.source_provider | string | Yes | Provider that supplied the rate | fawazahmed0 |
+| rate.rate_decimal | string | Yes | Exact stored rate, 10 fractional digits | 0.0085300000 |
 
 **Response Example**
 
@@ -279,7 +282,8 @@ Returns the current exchange rate for a single currency pair. The response inclu
     "rate": 0.00853,
     "updated_at": "2026-03-21T16:00:00Z",
     "is_outdated": false,
-    "source_provider": "fawazahmed0"
+    "source_provider": "fawazahmed0",
+    "rate_decimal": "0.0085300000"
   }
 }
 ```
@@ -331,6 +335,7 @@ Returns current rates for multiple target currencies relative to a single base c
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | rates | repeated Rate | Yes | One Rate per requested target. Missing pairs are omitted (not an error). |
+| rates[].rate_decimal | string | Yes | Exact stored rate, 10 fractional digits |
 
 **Response Example**
 
@@ -343,7 +348,8 @@ Returns current rates for multiple target currencies relative to a single base c
       "rate": 0.00853,
       "updated_at": "2026-03-21T16:00:00Z",
       "is_outdated": false,
-      "source_provider": "fawazahmed0"
+      "source_provider": "fawazahmed0",
+      "rate_decimal": "0.0085300000"
     },
     {
       "from_currency": "RSD",
@@ -351,7 +357,8 @@ Returns current rates for multiple target currencies relative to a single base c
       "rate": 0.00928,
       "updated_at": "2026-03-21T16:00:00Z",
       "is_outdated": false,
-      "source_provider": "fawazahmed0"
+      "source_provider": "fawazahmed0",
+      "rate_decimal": "0.0092800000"
     }
   ]
 }
@@ -468,11 +475,12 @@ sequenceDiagram
     participant Repo as Repository
     participant DB as PostgreSQL
 
-    Scheduler->>Config: Get active pairs and intervals
-    Config->>DB: Load pairs + provider assignments
-    DB-->>Config: Pairs with providers
+    Note over Scheduler: One polling loop per active pair,<br/>started/stopped/restarted by the reload loop (§3.1.2)
 
-    loop For each pair where interval elapsed
+    loop Immediately on start, then every polling_interval_seconds
+        Scheduler->>Config: Get provider assignments for pair
+        Config->>DB: Load pair_provider_config
+        DB-->>Config: Primary + backup providers
         Scheduler->>AR: FetchRate(pair, primary_provider)
         AR->>Primary: HTTP GET
         alt Primary succeeds
@@ -503,9 +511,9 @@ sequenceDiagram
 
 **Algorithm**
 
-1. Scheduler checks all active currency pairs and their polling intervals
-2. For each pair where the interval has elapsed since the last poll:
-   a. Resolve the primary provider from `pair_provider_config`
+1. The service runs one polling loop per active currency pair. The reload loop (Section 3.1.2) starts a loop for each new or reactivated pair, stops it for a deactivated or removed pair, and restarts it when `polling_interval_seconds` changes. A started or restarted loop polls immediately, then once per `polling_interval_seconds`
+2. On each poll of a pair:
+   a. Read the pair's provider assignments fresh from `pair_provider_config` and resolve the primary provider
    b. Call the provider adapter's `FetchRate()` method
    c. If successful: store the rate with `is_outdated=false`, record success in health tracker
    d. If failed: record failure in health tracker, resolve backup provider
@@ -515,11 +523,13 @@ sequenceDiagram
 
 **Preconditions**
 - Service is running and connected to PostgreSQL
-- At least one currency pair is configured and active in the database
-- At least one provider is assigned to each active pair
+- The currency pair is active and its polling loop has been started by the reload loop
+- At least one provider is assigned to the pair
+
+> With no active pairs the service keeps running without polling loops and picks pairs up on the next configuration reload.
 
 **Trigger**
-Polling interval elapsed for a currency pair (checked by the scheduler on a tick cycle).
+A pair's polling loop is started or restarted (first poll immediately), or the pair's polling interval has elapsed since its previous poll.
 
 **Basic Flow**
 Primary provider responds successfully → rate stored → health updated → done.
@@ -655,7 +665,7 @@ Request received → pair resolved → latest rate queried → response returned
 - Database connection error → `INTERNAL`
 
 **Acceptance Criteria**
-- Response includes rate value, timestamp, `is_outdated` flag, and source provider name
+- Response includes rate value as both `rate` and `rate_decimal`, timestamp, `is_outdated` flag, and source provider name
 - Response time <50ms (rate served from local database)
 - No external API calls during rate retrieval
 
@@ -810,7 +820,7 @@ erDiagram
 ### 2.4.2 Table: currency_pairs
 
 **Description**
-Configured currency pairs. This is the primary business configuration table (per BR-12). Adding a new pair is a database operation — no code changes or service restart required.
+Configured currency pairs. This is the primary business configuration table (per BR-12). Adding a new pair is a database operation — no code changes or service restart required; the pair is picked up within `CONFIG_RELOAD_INTERVAL`.
 
 **Data Model**
 
@@ -925,7 +935,7 @@ Exchange rate records — both current and historical. There is no separate "cur
 | rates_latest_idx | (currency_pair_id, fetched_at DESC) | Efficient lookup of the most recent rate per pair |
 | rates_history_idx | (currency_pair_id, fetched_at ASC) | Efficient range queries for GetRateHistory |
 
-> `NUMERIC(20,10)` provides sufficient precision for both fiat rates (e.g., 0.0085300000 for RSD→EUR) and future crypto rates which may have many decimal places.
+> `NUMERIC(20,10)` provides sufficient precision for both fiat rates (e.g., 0.0085300000 for RSD→EUR) and future crypto rates which may have many decimal places. The stored value is the provider's number taken from the JSON text without conversion to float; PostgreSQL rounds it to 10 fractional digits if the provider sends more.
 
 ### 2.4.6 Table: provider_health
 
@@ -1031,6 +1041,7 @@ System settings are loaded at startup from environment variables (or `.env` file
 | `LOG_FORMAT` | string | `json` | Log output format: `json` (production) or `text` (development) |
 | `PROVIDER_HTTP_TIMEOUT` | duration | `10s` | HTTP client timeout for external provider requests |
 | `SHUTDOWN_TIMEOUT` | duration | `15s` | Graceful shutdown deadline — time allowed for in-flight polling to complete |
+| `CONFIG_RELOAD_INTERVAL` | duration | `60s` | How often business configuration (pairs, providers) is reloaded from the database; values `<= 0` fall back to the default |
 
 **Notes**
 
@@ -1041,38 +1052,43 @@ System settings are loaded at startup from environment variables (or `.env` file
 
 ### 3.1.2 Business Configuration (Database-Driven, per BR-12)
 
-All business configuration resides in the database and can be modified at runtime without service restart. The polling engine periodically reloads configuration from the database (reload interval: every polling tick cycle).
+All business configuration resides in the database and can be modified at runtime without service restart. A reload loop rereads pairs and providers from the database every `CONFIG_RELOAD_INTERVAL` (default 60s); changes take effect within that interval.
 
 **Currency Pairs (`currency_pairs` table)**
 
 | Operation | Method | Service Restart |
 |-----------|--------|-----------------|
-| Add a new pair | INSERT into `currency_pairs` + INSERT into `pair_provider_config` | No — picked up on next reload |
-| Deactivate a pair | UPDATE `is_active = false` | No — polling stops on next reload |
-| Change polling interval | UPDATE `polling_interval_seconds` | No — new interval applied on next reload |
+| Add a new pair | INSERT into `currency_pairs` + INSERT into `pair_provider_config` | No — within `CONFIG_RELOAD_INTERVAL`; first poll immediately |
+| Deactivate a pair | UPDATE `is_active = false` | No — within `CONFIG_RELOAD_INTERVAL`; polling stops |
+| Reactivate a pair | UPDATE `is_active = true` | No — within `CONFIG_RELOAD_INTERVAL`; first poll immediately |
+| Change polling interval | UPDATE `polling_interval_seconds` | No — within `CONFIG_RELOAD_INTERVAL`; polling restarts with the new interval, first poll immediately |
 
 **Providers (`providers` table)**
 
 | Operation | Method | Service Restart |
 |-----------|--------|-----------------|
-| Add a generic JSON provider | INSERT into `providers` with `adapter_type = 'generic_json'` | No |
+| Add a generic JSON provider | INSERT into `providers` with `adapter_type = 'generic_json'` | No — within `CONFIG_RELOAD_INTERVAL` |
 | Add a custom adapter provider | INSERT into `providers` with `adapter_type = 'custom'` | Yes — requires code deployment for the adapter |
-| Deactivate a provider | UPDATE `is_active = false` | No — failover uses remaining active providers |
-| Update URL or JSONPath | UPDATE `base_url` / `rate_json_path` | No — applied on next fetch |
+| Deactivate a provider | UPDATE `is_active = false` | No — within `CONFIG_RELOAD_INTERVAL`; failover uses remaining active providers |
+| Update URL or JSONPath | UPDATE `base_url` / `rate_json_path` | No — within `CONFIG_RELOAD_INTERVAL` |
+| Update currency code mapping | UPDATE `currency_code_mapping` | No — within `CONFIG_RELOAD_INTERVAL` |
 
 **Pair-Provider Assignments (`pair_provider_config` table)**
 
 | Operation | Method | Service Restart |
 |-----------|--------|-----------------|
-| Change primary provider for a pair | Deactivate current primary, INSERT new assignment with `priority = 'primary'` | No |
-| Add backup provider | INSERT with `priority = 'backup'` | No |
-| Remove backup | UPDATE `is_active = false` on the backup assignment | No |
+| Change primary provider for a pair | Deactivate current primary, INSERT new assignment with `priority = 'primary'` | No — read at the start of every poll cycle |
+| Add backup provider | INSERT with `priority = 'backup'` | No — read at the start of every poll cycle |
+| Remove backup | UPDATE `is_active = false` on the backup assignment | No — read at the start of every poll cycle |
 
 **Configuration Reload Behavior**
 
-- The polling engine reads active pairs and their provider assignments from the database at the start of each tick cycle
-- No in-memory cache with separate TTL — configuration is always read fresh from the database alongside the polling logic
-- If a configuration read fails (DB error), the previous configuration is retained until the next successful read
+- Every `CONFIG_RELOAD_INTERVAL` (default 60s; values `<= 0` fall back to the default) the reload loop:
+  - reads active providers and rebuilds the adapter registry, so changes to `base_url`, `rate_json_path` and `currency_code_mapping` apply without restart
+  - reconciles polling with active pairs: starts polling for new or reactivated pairs (first poll immediately), stops polling for deactivated or removed pairs, restarts polling for pairs whose `polling_interval_seconds` changed (first poll immediately)
+- Pair-provider assignments are not cached — they are read fresh from the database at the start of every poll cycle
+- If a reload read fails (DB error), the previous configuration stays in effect, the error is logged, and the next run retries
+- A reload is logged at `info` only when something changed, otherwise at `debug`
 - Adding a new `custom` adapter type is the only operation that requires a code change and redeployment
 
 ## 3.2 General Non-functional Requirements
@@ -1100,16 +1116,16 @@ All business configuration resides in the database and can be modified at runtim
 
 | Dimension | v1 Capacity | Design Ceiling |
 |-----------|------------|----------------|
-| Currency pairs | 3 (RSD↔EUR, RSD↔USD, EUR↔USD) | No architectural limit — adding pairs is a DB operation |
+| Currency pairs | 5 (RSD→EUR, RSD→USD, EUR→USD, GBP→USD, CHF→USD) | No architectural limit — adding pairs is a DB operation |
 | Providers | 2–3 | No limit; adapter registry scales with provider count |
-| Rate history retention | Unlimited (v1) | ~26K rows/year at hourly polling for 3 pairs; future: aggregation policy |
+| Rate history retention | Unlimited (v1) | ~44K rows/year at hourly polling for 5 pairs (5 × 24 × 365 = 43,800); future: aggregation policy |
 | Concurrent gRPC consumers | Low (2–3 services) | pgx pool sized at 10 connections; sufficient for expected consumer count |
 
 **Database Optimization**
 
 - **Latest rate lookup**: Covered by `rates_latest_idx` — `(currency_pair_id, fetched_at DESC)` index ensures the "current rate" query is an index-only scan
 - **History range queries**: Covered by `rates_history_idx` — `(currency_pair_id, fetched_at ASC)` for efficient bounded range scans
-- **No table bloat concern in v1**: At hourly polling for 3 pairs, the `rates` table grows by ~26K rows/year — negligible for PostgreSQL
+- **No table bloat concern in v1**: At hourly polling for 5 pairs, the `rates` table grows by ~44K rows/year — negligible for PostgreSQL
 
 ### 3.2.2 Security
 
@@ -1196,7 +1212,7 @@ All business configuration resides in the database and can be modified at runtim
 
 | Level | Events |
 |-------|--------|
-| `info` | Service startup/shutdown, polling cycle start/complete (per pair, summary), provider failover triggered, configuration reloaded, gRPC server listening |
+| `info` | Service startup/shutdown, polling cycle start/complete (per pair, summary), provider failover triggered, configuration reloaded (only when something changed; otherwise `debug`), gRPC server listening |
 | `warn` | Provider fetch failed (single provider, before failover), rate flagged as outdated, configuration read failed (using previous config), slow polling cycle (>30s) |
 | `error` | Both providers failed for a pair, database connection lost, gRPC server error, unrecoverable polling failure |
 | `debug` | HTTP request/response to providers (URL, status code, latency), rate value stored, gRPC request details, DB query timings |
@@ -1299,7 +1315,7 @@ In v1, operational metrics are derived from structured logs and the health endpo
 **Rationale:**
 - Adding a new currency pair or swapping a provider is an INSERT/UPDATE — no SSH, no file edit, no restart
 - Configuration is queryable and auditable — `SELECT * FROM currency_pairs` shows the full state
-- The polling engine reloads config from DB on each tick cycle — changes take effect within one polling interval
+- The reload loop rereads config from DB every `CONFIG_RELOAD_INTERVAL` (default 60 s) — changes take effect within that interval, without restart
 - Consistent with the data model: pairs, providers, and assignments are relational data with foreign key dependencies — they belong in the database
 - Only exception: custom adapter code requires deployment, but the *registration* of the custom provider is still a DB record
 
@@ -1385,7 +1401,7 @@ In v1, operational metrics are derived from structured logs and the health endpo
 - No data duplication or synchronization between current and historical stores
 - The `rates_latest_idx` index on `(currency_pair_id, fetched_at DESC)` makes the "current rate" query an efficient index scan — no full table scan regardless of table size
 - Historical queries use `rates_history_idx` on `(currency_pair_id, fetched_at ASC)` for range scans
-- At hourly polling for 3 pairs, the table grows by ~26K rows/year — trivial for PostgreSQL, no partitioning or archival needed in v1
+- At hourly polling for 5 pairs, the table grows by ~44K rows/year (5 × 24 × 365 = 43,800) — trivial for PostgreSQL, no partitioning or archival needed in v1
 
 **Consequences:**
 - "Get current rate" query is slightly more complex than a simple primary key lookup on a dedicated `current_rates` table — mitigated by the covering index
@@ -1446,7 +1462,7 @@ Every provider adapter — whether generic (config-driven) or custom (code) — 
 
 | Field | Type | Description | Example |
 |-------|------|-------------|---------|
-| Rate | decimal | Exchange rate value | `0.00853` |
+| Rate | decimal | Exchange rate value, carried as decimal text from the JSON response to the database (no float conversion) | `0.00853` |
 | FetchedAt | timestamp | When the rate was retrieved from the provider | `2026-03-21T16:00:00Z` |
 | SourceName | string | Provider name for attribution | `fawazahmed0` |
 
@@ -1486,9 +1502,9 @@ The generic JSON adapter handles any provider that follows the pattern: HTTP GET
 1. Resolve provider-specific currency codes via `currency_code_mapping` (fallback: use internal codes as-is)
 2. Substitute `{from}` and `{to}` in `base_url` to produce the request URL
 3. Execute HTTP GET with context timeout (`PROVIDER_HTTP_TIMEOUT`)
-4. Parse JSON response body
+4. Parse JSON response body, keeping numbers as their JSON text (no conversion to float)
 5. Navigate to the rate value using `rate_json_path` (with `{from}` / `{to}` substituted)
-6. Validate: rate must be a positive number
+6. Validate: rate must be a positive decimal number
 7. Return the result: rate value, current timestamp as `FetchedAt`, provider name as `SourceName`
 
 **Rate Inversion**
@@ -1541,7 +1557,7 @@ Example response: {"base":"EUR", "date":"2026-03-21", "rates":{"USD":1.0842}}
 Path resolved:    rates.USD → 1.0842
 ```
 
-> **Limitation:** Frankfurter uses European Central Bank data and does **not support RSD**. It can only serve the EUR↔USD pair in v1. Not suitable as a provider for RSD pairs.
+> **Limitation:** Frankfurter uses European Central Bank data and does **not support RSD**. It is assigned to EUR→USD, GBP→USD and CHF→USD. Cross rates for non-EUR bases (e.g., GBP→USD) are derived from ECB EUR rates and published with 4 decimal places.
 
 ## 5.3 Custom Adapter Interface
 
@@ -1582,8 +1598,8 @@ No custom adapters are needed in v1 — all three providers (fawazahmed0, Exchan
 
 | name | adapter_type | base_url | rate_json_path | currency_code_mapping | api_key | is_active |
 |------|-------------|----------|----------------|----------------------|---------|-----------|
-| fawazahmed0 | generic_json | `https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/{from}.min.json` | `{from}.{to}` | `{"RSD":"rsd","EUR":"eur","USD":"usd"}` | null | true |
-| fawazahmed0-fallback | generic_json | `https://latest.currency-api.pages.dev/v1/currencies/{from}.min.json` | `{from}.{to}` | `{"RSD":"rsd","EUR":"eur","USD":"usd"}` | null | true |
+| fawazahmed0 | generic_json | `https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/{from}.min.json` | `{from}.{to}` | `{"RSD":"rsd","EUR":"eur","USD":"usd","GBP":"gbp","CHF":"chf"}` | null | true |
+| fawazahmed0-fallback | generic_json | `https://latest.currency-api.pages.dev/v1/currencies/{from}.min.json` | `{from}.{to}` | `{"RSD":"rsd","EUR":"eur","USD":"usd","GBP":"gbp","CHF":"chf"}` | null | true |
 | exchangerate-api | generic_json | `https://open.er-api.com/v6/latest/{from}` | `rates.{to}` | null | null | true |
 | frankfurter | generic_json | `https://api.frankfurter.dev/v1/latest?base={from}&symbols={to}` | `rates.{to}` | null | null | true |
 
@@ -1599,16 +1615,24 @@ No custom adapters are needed in v1 — all three providers (fawazahmed0, Exchan
 | RSD→USD | exchangerate-api | backup | true | Supports RSD, free open access |
 | EUR→USD | frankfurter | primary | true | ECB data source, high quality for EUR pairs |
 | EUR→USD | fawazahmed0 | backup | true | Universal fallback with broad currency support |
+| GBP→USD | frankfurter | primary | true | ECB reference rate, as EUR→USD |
+| GBP→USD | fawazahmed0-fallback | backup | true | Same data as fawazahmed0 from pages.dev, fresh, no rate limits |
+| CHF→USD | frankfurter | primary | true | ECB reference rate, as EUR→USD |
+| CHF→USD | fawazahmed0-fallback | backup | true | Same data as fawazahmed0 from pages.dev, fresh, no rate limits |
+
+> The GBP→USD and CHF→USD pairs, their assignments and the `GBP`/`CHF` entries in the `currency_code_mapping` of both fawazahmed0 providers are added by migration `006_pairs_gbp_chf`.
 
 **Provider Coverage Matrix**
 
-| Provider | RSD↔EUR | RSD↔USD | EUR↔USD | Rate Limits | Auth |
-|----------|---------|---------|---------|-------------|------|
-| fawazahmed0 (CDN) | ✅ | ✅ | ✅ | None | None |
-| fawazahmed0 (pages.dev) | ✅ | ✅ | ✅ | None | None |
-| ExchangeRate-API (open) | ✅ | ✅ | ✅ | ~1/day recommended | None |
-| Frankfurter | ❌ | ❌ | ✅ | None | None |
+| Provider | RSD→EUR | RSD→USD | EUR→USD | GBP→USD | CHF→USD | Rate Limits | Auth |
+|----------|---------|---------|---------|---------|---------|-------------|------|
+| fawazahmed0 (CDN) | ✅ | ✅ | ✅ | ✅ | ✅ | None | None |
+| fawazahmed0 (pages.dev) | ✅ | ✅ | ✅ | ✅ | ✅ | None | None |
+| ExchangeRate-API (open) | ✅ | ✅ | ✅ | ✅ | ✅ | ~1/day recommended | None |
+| Frankfurter | ❌ | ❌ | ✅ | ✅ | ✅ | None | None |
 
-> **Key constraint:** Frankfurter does not support RSD (Serbian Dinar is not published by the ECB). It is only assigned to the EUR↔USD pair where ECB data is the highest quality source.
+> GBP→USD and CHF→USD coverage verified 2026-10-05.
+
+> **Key constraint:** Frankfurter does not support RSD (Serbian Dinar is not published by the ECB). It is assigned only to the EUR→USD, GBP→USD and CHF→USD pairs, where ECB data is the highest quality source.
 
 ---

@@ -3,6 +3,7 @@
 # 1. Document Overview
 - **Document Owner:** Igor Kudinov — Business & System Analyst
 - **Date / Version:** March 2026 / v1.0
+- **Amendments:** [Amendment 1 (2026-10-05)](currency_rate_service_brd_amendment_1.md) — two new pairs, exact decimal rate, configuration hot reload
 - **Related Initiatives / Projects:** Expense Tracker Ecosystem, Invoice Generator (future), Microservice Architecture Migration
 - **Main Stakeholders:** Project Owner (BSA/Developer), Expense Tracker Backend (primary consumer), Invoice Generator (future consumer)
 
